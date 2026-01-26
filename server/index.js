@@ -6,20 +6,17 @@ import cors from "cors";
 import path from "path";
 import { fileURLToPath } from "url";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 const app = express();
 app.use(cors());
 
 // Serve static files from dist
-app.use(express.static(path.join(__dirname, "../dist")));
+const DIST_PATH = path.join(process.cwd(), "dist");
+app.use(express.static(DIST_PATH));
 
-// Handle React routing, return all requests to React app
 // Handle React routing, return all requests to React app
 app.use((req, res) => {
   if (req.method === "GET") {
-    res.sendFile(path.join(__dirname, "../dist", "index.html"));
+    res.sendFile(path.join(DIST_PATH, "index.html"));
   } else {
     res.status(404).send("Not found");
   }

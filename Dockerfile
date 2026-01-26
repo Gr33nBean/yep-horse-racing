@@ -27,9 +27,9 @@ RUN yarn install --frozen-lockfile --production
 
 # Copy built assets from builder
 COPY --from=builder /app/dist ./dist
-# Copy server code
-COPY --from=builder /app/server ./server
+# Copy built server from builder
+COPY --from=builder /app/dist-server ./dist-server
 
 EXPOSE 3000
 
-CMD ["node", "server/index.js"]
+CMD ["node", "dist-server/index.cjs"]
