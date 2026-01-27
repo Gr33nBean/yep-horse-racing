@@ -39,4 +39,5 @@ export interface GameState {
   audienceCount?: number; // Number of identified players in audience room
   connectedUsers?: string[]; // List of lucky numbers connected
   sampledClients?: { luckyNumber: string; taps: number }[]; // Realtime sample data
+  selectedHorseId?: string;
 }

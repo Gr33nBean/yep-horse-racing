@@ -116,7 +116,13 @@ io.on("connection", (socket) => {
   });
   socket.on(
     "admin:startRace",
-    ({ name, durationSeconds, buttonLayout = "classic", delaySeconds = 5 }) => {
+    ({
+      name,
+      durationSeconds,
+      buttonLayout = "classic",
+      delaySeconds = 5,
+      selectedHorseId = "1"
+    }) => {
       const startTime = Date.now() + delaySeconds * 1e3;
       gameState = {
         phase: "COUNTDOWN",
@@ -126,7 +132,8 @@ io.on("connection", (socket) => {
         raceName: name,
         raceDuration: durationSeconds,
         buttonLayout,
-        winners: []
+        winners: [],
+        selectedHorseId
       };
       for (const k in scores) delete scores[k];
       io.emit("raceCountdown", {
@@ -209,7 +216,9 @@ var startRacePhysics = (durationSeconds, raceName = "Race") => {
     });
     setTimeout(() => {
       const avgTapsOfSample = responsesReceived > 0 ? totalTaps / responsesReceived : 0;
-      const targetSpeed = Math.min(avgTapsOfSample * 10 * 10, 100);
+      const MIN_SPEED = 15;
+      const rawSpeed = avgTapsOfSample * 10 * 10;
+      const targetSpeed = Math.min(Math.max(rawSpeed, MIN_SPEED), 100);
       currentSpeed = currentSpeed * 0.8 + targetSpeed * 0.2;
       const jitter = currentSpeed > 5 ? (Math.random() - 0.5) * 5 : 0;
       const visualSpeed = Math.max(0, Math.min(100, currentSpeed + jitter));

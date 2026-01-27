@@ -16,6 +16,7 @@ export function RaceManagement({ gameState }: Props) {
   const [selectedRace, setSelectedRace] = useState<string | null>(null);
   const [customDuration, setCustomDuration] = useState<number>(60);
   const [buttonLayout, setButtonLayout] = useState<ButtonLayout>("classic");
+  const [selectedHorse, setSelectedHorse] = useState<string>("1");
 
   const startRace = () => {
     if (selectedRace && customDuration) {
@@ -24,6 +25,7 @@ export function RaceManagement({ gameState }: Props) {
         durationSeconds: customDuration,
         delaySeconds: GAME_CONFIG.COUNTDOWN_SECONDS,
         buttonLayout,
+        selectedHorseId: selectedHorse,
       });
       // We don't clear state here so admin can easily restart same config
     }
@@ -86,6 +88,36 @@ export function RaceManagement({ gameState }: Props) {
                 </button>
               ))}
             </div>
+          </div>
+        </div>
+
+        {/* Horse Selection */}
+        <div className="space-y-2">
+          <label className="text-sm text-gray-400 font-bold">
+            SELECT HORSE AVATAR
+          </label>
+          <div className="grid grid-cols-4 gap-2 sm:gap-4">
+            {["1", "2", "3", "4"].map((id) => (
+              <button
+                key={id}
+                onClick={() => setSelectedHorse(id)}
+                className={`relative w-full aspect-square rounded-xl border-2 overflow-hidden transition-all ${
+                  selectedHorse === id
+                    ? "border-yellow-500 ring-2 ring-yellow-500/50 scale-105"
+                    : "border-gray-700 opacity-60 hover:opacity-100"
+                }`}
+              >
+                <div
+                  className="absolute inset-0 bg-contain bg-center bg-no-repeat"
+                  style={{ backgroundImage: `url('/images/run/${id}.png')` }}
+                />
+                {selectedHorse === id && (
+                  <div className="absolute top-1 right-1 w-4 h-4 bg-yellow-500 rounded-full text-[10px] flex items-center justify-center text-black font-bold shadow-sm">
+                    ✓
+                  </div>
+                )}
+              </button>
+            ))}
           </div>
         </div>
 

@@ -144,7 +144,13 @@ io.on("connection", (socket) => {
 
   socket.on(
     "admin:startRace",
-    ({ name, durationSeconds, buttonLayout = "classic", delaySeconds = 5 }) => {
+    ({
+      name,
+      durationSeconds,
+      buttonLayout = "classic",
+      delaySeconds = 5,
+      selectedHorseId = "1",
+    }) => {
       const startTime = Date.now() + delaySeconds * 1000;
 
       // First, broadcast countdown
@@ -156,6 +162,7 @@ io.on("connection", (socket) => {
         raceDuration: durationSeconds,
         buttonLayout: buttonLayout,
         winners: [],
+        selectedHorseId: selectedHorseId,
       };
 
       // Clear scores for new race
@@ -241,7 +248,9 @@ const startRacePhysics = (durationSeconds, raceName = "Race") => {
   // Horse speed state (visual only)
   let currentSpeed = 0; // 0-100 (percentage)
 
-  console.log(`Starting Race "${raceName}": duration=${targetDuration}ms`);
+  console.log(
+    `Starting Race "${raceName}" (Horse: ${gameState.selectedHorseId}): duration=${targetDuration}ms`,
+  );
 
   if (raceInterval) clearInterval(raceInterval);
 
@@ -306,7 +315,9 @@ const startRacePhysics = (durationSeconds, raceName = "Race") => {
       // Assume Max Taps Per Second realistic is ~10-12 taps/sec
       // So target speed (0-100) = (TapsPerSec / 10) * 100
 
-      const targetSpeed = Math.min(avgTapsOfSample * 10 * 10, 100);
+      const MIN_SPEED = 15; // Animation lower bound (so horse moves even if lazy audience)
+      const rawSpeed = avgTapsOfSample * 10 * 10;
+      const targetSpeed = Math.min(Math.max(rawSpeed, MIN_SPEED), 100);
 
       // Apply Smoothing (Inertia) to prevent erratic jumping
       // New Speed = 80% Old Speed + 20% Target Speed
