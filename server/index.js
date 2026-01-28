@@ -2,18 +2,41 @@ import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
 import cors from "cors";
-
 import path from "path";
-import { fileURLToPath } from "url";
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+const CONFIG = {
+  PORT: 3000,
+  TICK_RATE: 100, // ms between race updates
+  COUNTDOWN_SECONDS: 3,
+  MIN_SPEED: 15, // Minimum horse animation speed
+  SPEED_SMOOTHING: 0.8, // Inertia factor (0-1)
+  TAP_REQUEST_TIMEOUT: 50, // ms to wait for tap responses
+  SAMPLE_SIZE: 5, // Max clients to sample for taps
+  TEST_SIGNAL_COOLDOWN: 3000, // ms between test signals per user
+};
+
+const PHASES = {
+  WAITING: "WAITING",
+  COUNTDOWN: "COUNTDOWN",
+  RACING: "RACING",
+  RESULT: "RESULT",
+};
+
+// ============================================================================
+// EXPRESS & SOCKET.IO SETUP
+// ============================================================================
 
 const app = express();
 app.use(cors());
 
-// Serve static files from dist
 const DIST_PATH = path.join(process.cwd(), "dist");
 app.use(express.static(DIST_PATH));
 
-// Handle React routing, return all requests to React app
+// SPA fallback
 app.use((req, res) => {
   if (req.method === "GET") {
     res.sendFile(path.join(DIST_PATH, "index.html"));
@@ -24,60 +47,34 @@ app.use((req, res) => {
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"],
-  },
+  cors: { origin: "*", methods: ["GET", "POST"] },
   pingTimeout: 60000,
   pingInterval: 25000,
   connectTimeout: 45000,
-  allowEIO3: true, // Support older socket.io clients if any
+  allowEIO3: true,
 });
 
-// Simple in-memory state
+// ============================================================================
+// STATE
+// ============================================================================
+
 let gameState = {
-  phase: "WAITING",
+  phase: PHASES.WAITING,
   startTime: null,
   raceConfigId: null,
 };
 
-const scores = {}; // socketId -> score
-const socketUsers = {}; // socketId -> luckyNumber
+const scores = {};
+const socketUsers = {};
+const lastTestSignal = {};
 
-// Real-time Race Loop
-const TICK_RATE = 100; // 100ms
-let raceInterval;
+let raceInterval = null;
 
-// Race Physics State
-let raceProgress = 0; // 0 to 100
-let baseSpeed = 0.05; // Base progress per tick
-let tapAccumulator = 0; // Taps in current tick
+// ============================================================================
+// HELPERS
+// ============================================================================
 
-const broadcastStats = () => {
-  const audienceIds = Array.from(
-    io.sockets.adapter.rooms.get("audience") || [],
-  );
-  const luckyNumbers = audienceIds
-    .map((id) => socketUsers[id])
-    .filter(Boolean)
-    .sort((a, b) => a - b); // Sort numerically if possible
-
-  const stats = {
-    connectedDevices: io.engine.clientsCount,
-    audienceCount: audienceIds.length,
-    luckyNumbers,
-  };
-  io.emit("serverStats", stats);
-};
-
-io.on("connection", (socket) => {
-  console.log(
-    `User connected: ${socket.id}. Total connections: ${io.engine.clientsCount}`,
-  );
-  broadcastStats();
-
-  // Send current state immediately
-  // Note: We need to calculate current audience state for the new connection
+const getAudienceInfo = () => {
   const audienceIds = Array.from(
     io.sockets.adapter.rooms.get("audience") || [],
   );
@@ -85,249 +82,96 @@ io.on("connection", (socket) => {
     .map((id) => socketUsers[id])
     .filter(Boolean)
     .sort((a, b) => a - b);
+  return { audienceIds, luckyNumbers };
+};
 
-  socket.emit("gameState", {
-    ...gameState,
+const broadcastStats = () => {
+  const { audienceIds, luckyNumbers } = getAudienceInfo();
+  io.emit("serverStats", {
     connectedDevices: io.engine.clientsCount,
     audienceCount: audienceIds.length,
-    connectedUsers: luckyNumbers, // Include the list!
+    luckyNumbers,
   });
+};
 
-  socket.on("identify", ({ luckyNumber }, callback) => {
-    socketUsers[socket.id] = luckyNumber;
-    socket.join("audience"); // Join audience room
-    console.log(
-      `Socket ${socket.id} identified as ${luckyNumber} and joined 'audience' room`,
-    );
+const clearScores = () => {
+  for (const k in scores) delete scores[k];
+};
 
-    // Acknowledge success to client
-    if (callback) {
-      callback({ success: true, socketId: socket.id });
-    }
+const getWinner = () => {
+  const sorted = Object.entries(scores).sort(([, a], [, b]) => b - a);
+  return sorted.length > 0 ? [sorted[0][0]] : [];
+};
 
-    // Broadcast updated stats (audience count changed)
-    broadcastStats();
-  });
+const sampleAudienceSockets = (count) => {
+  const ids = Object.keys(socketUsers);
+  const shuffled = [...ids].sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, Math.min(count, ids.length));
+};
 
-  // Track last test signal time to prevent spam
-  const lastTestSignal = {};
-
-  socket.on("client:testSignal", () => {
-    const luckyNumber = socketUsers[socket.id];
-    if (!luckyNumber) return;
-
-    const now = Date.now();
-    const lastTime = lastTestSignal[socket.id] || 0;
-
-    // Rate limit: 3 seconds per user
-    if (now - lastTime < 3000) {
-      return;
-    }
-
-    lastTestSignal[socket.id] = now;
-    console.log(`Test Signal from ${luckyNumber}`);
-
-    // Broadcast only to projector (or everyone, simpler)
-    io.emit("server:testSignal", { luckyNumber });
-  });
-
-  socket.on("unidentify", () => {
-    const luckyNumber = socketUsers[socket.id];
-    if (luckyNumber) {
-      console.log(`Socket ${socket.id} un-identified (was ${luckyNumber})`);
-      delete socketUsers[socket.id];
-      delete lastTestSignal[socket.id]; // cleanup
-      socket.leave("audience");
-      broadcastStats();
-    }
-  });
-
-  socket.on(
-    "admin:startRace",
-    ({
-      name,
-      durationSeconds,
-      buttonLayout = "classic",
-      delaySeconds = 5,
-      selectedHorseId = "1",
-    }) => {
-      const startTime = Date.now() + delaySeconds * 1000;
-
-      // First, broadcast countdown
-      gameState = {
-        phase: "COUNTDOWN",
-        startTime: startTime,
-        raceConfigId: "custom", // legacy or placeholder
-        raceName: name,
-        raceDuration: durationSeconds,
-        buttonLayout: buttonLayout,
-        winners: [],
-        selectedHorseId: selectedHorseId,
-      };
-
-      // Clear scores for new race
-      for (const k in scores) delete scores[k];
-
-      // Broadcast countdown to everyone
-      io.emit("raceCountdown", {
-        ...gameState,
-        countdown: delaySeconds,
-      });
-
-      // Detailed audience logging
-      const audienceSocketIds = Array.from(
-        io.sockets.adapter.rooms.get("audience") || [],
-      );
-      const audienceNumbers = audienceSocketIds
-        .map((id) => socketUsers[id])
-        .filter(Boolean);
-
-      // After delay, actually start the race
-      setTimeout(() => {
-        gameState.phase = "RACING";
-
-        // Broadcast race started
-        io.emit("raceStarted", gameState);
-        io.emit("gameState", gameState);
-
-        // Start physics loop
-        startRacePhysics(durationSeconds, name);
-      }, delaySeconds * 1000);
-    },
-  );
-
-  socket.on("admin:reset", () => {
-    gameState = { phase: "WAITING", startTime: null, raceConfigId: null };
-    io.emit("gameState", gameState);
-  });
-
-  socket.on("admin:controlMusic", (action) => {
-    // action: { type: 'play' | 'stop' | 'volume', value?: number }
-    io.emit("projector:controlMusic", action);
-  });
-
-  socket.on("disconnect", () => {
-    console.log(`User disconnected: ${socket.id}`);
-    delete socketUsers[socket.id];
-    broadcastStats();
-  });
-
-  socket.on("client:taps", ({ count }) => {
-    // Validate game phase
-    if (gameState.phase !== "RACING") {
-      console.log(`Tap rejected: game phase is ${gameState.phase}`);
-      return;
-    }
-
-    // We store score by luckyNumber if available, or socketId fallback
-    const id = socketUsers[socket.id] || socket.id;
-
-    // Update score
-    if (!scores[id]) scores[id] = 0;
-    scores[id] += count;
-
-    console.log(`Tap received: ${id} +${count} taps (total: ${scores[id]})`);
-  });
-
-  // Broadcast leaderboard every 1s during race
-  // (Handled by setInterval below)
-});
-
-// START RACE HANDLER (Shared across all sockets, but triggered by one)
-// Note: This logic needs to be outside the per-socket scope or handled carefully
-// to avoid multiple intervals if multiple admins connected (though unlikely for this use case).
-// Better approach: Define `startRacePhysics` function.
+// ============================================================================
+// RACE PHYSICS
+// ============================================================================
 
 const startRacePhysics = (durationSeconds, raceName = "Race") => {
-  // Reset state
-  raceProgress = 0;
-
-  const targetDuration = durationSeconds * 1000; // Convert to ms
+  const targetDuration = durationSeconds * 1000;
   const raceStartTime = Date.now();
-
-  // Horse speed state (visual only)
-  let currentSpeed = 0; // 0-100 (percentage)
+  let currentSpeed = 0;
 
   console.log(
-    `Starting Race "${raceName}" (Horse: ${gameState.selectedHorseId}): duration=${targetDuration}ms`,
+    `Starting Race "${raceName}" (Horse: ${gameState.selectedHorseId}): ${durationSeconds}s`,
   );
 
   if (raceInterval) clearInterval(raceInterval);
 
   raceInterval = setInterval(() => {
-    if (gameState.phase !== "RACING") {
+    if (gameState.phase !== PHASES.RACING) {
       clearInterval(raceInterval);
       return;
     }
 
-    // Calculate time-based progress (guaranteed to finish on time)
     const elapsed = Date.now() - raceStartTime;
     const timeProgress = Math.min((elapsed / targetDuration) * 100, 100);
 
-    // Sample random clients for tap data (max 5)
-    // ONLY sample sockets that have identified as a lucky number (audience)
-    const identifiedSocketIds = Object.keys(socketUsers);
-    const sampleSize = Math.min(5, identifiedSocketIds.length);
-    const sampledSockets = [];
-
-    // Random sampling from identified audience only
-    const shuffled = [...identifiedSocketIds].sort(() => Math.random() - 0.5);
-    for (let i = 0; i < sampleSize; i++) {
-      sampledSockets.push(shuffled[i]);
-    }
-
-    if (identifiedSocketIds.length === 0) {
-      console.log("No identified audience members to sample taps from.");
-    }
-
-    // Request taps from sampled clients
+    // Sample audience for tap data
+    const sampledSockets = sampleAudienceSockets(CONFIG.SAMPLE_SIZE);
     let totalTaps = 0;
     let responsesReceived = 0;
-    const individualResponses = {}; // Track per-socket taps
+    const individualResponses = {};
 
     sampledSockets.forEach((socketId) => {
       const socket = io.sockets.sockets.get(socketId);
       if (socket) {
-        // Use a timeout for the request to avoid hanging
-        socket.timeout(50).emit("requestTaps", {}, (err, response) => {
-          if (!err && response && response.taps) {
-            totalTaps += response.taps;
-            individualResponses[socketId] = response.taps; // Store individually
+        socket
+          .timeout(CONFIG.TAP_REQUEST_TIMEOUT)
+          .emit("requestTaps", {}, (err, response) => {
+            if (!err && response?.taps) {
+              totalTaps += response.taps;
+              individualResponses[socketId] = response.taps;
 
-            const luckyNumber = socketUsers[socketId];
-            if (luckyNumber) {
-              if (!scores[luckyNumber]) scores[luckyNumber] = 0;
-              scores[luckyNumber] += response.taps;
+              const luckyNumber = socketUsers[socketId];
+              if (luckyNumber) {
+                scores[luckyNumber] =
+                  (scores[luckyNumber] || 0) + response.taps;
+              }
             }
-          }
-          responsesReceived++;
-        });
+            responsesReceived++;
+          });
       }
     });
 
-    // Calculate speed based on taps (after a small delay for responses)
+    // Calculate speed after collecting responses
     setTimeout(() => {
-      const avgTapsOfSample =
-        responsesReceived > 0 ? totalTaps / responsesReceived : 0;
+      const avgTaps = responsesReceived > 0 ? totalTaps / responsesReceived : 0;
+      const rawSpeed = avgTaps * 100; // taps/100ms * 100
+      const targetSpeed = Math.min(Math.max(rawSpeed, CONFIG.MIN_SPEED), 100);
 
-      // avgTapsOfSample is taps per 100ms (tick rate)
-      // Convert to Taps Per Second: avgTapsOfSample * 10
-      // Assume Max Taps Per Second realistic is ~10-12 taps/sec
-      // So target speed (0-100) = (TapsPerSec / 10) * 100
-
-      const MIN_SPEED = 15; // Animation lower bound (so horse moves even if lazy audience)
-      const rawSpeed = avgTapsOfSample * 10 * 10;
-      const targetSpeed = Math.min(Math.max(rawSpeed, MIN_SPEED), 100);
-
-      // Apply Smoothing (Inertia) to prevent erratic jumping
-      // New Speed = 80% Old Speed + 20% Target Speed
-      currentSpeed = currentSpeed * 0.8 + targetSpeed * 0.2;
-
-      // Add random jitter to horse speed for visual variety (only if moving)
+      currentSpeed =
+        currentSpeed * CONFIG.SPEED_SMOOTHING +
+        targetSpeed * (1 - CONFIG.SPEED_SMOOTHING);
       const jitter = currentSpeed > 5 ? (Math.random() - 0.5) * 5 : 0;
       const visualSpeed = Math.max(0, Math.min(100, currentSpeed + jitter));
 
-      // Broadcast progress and speed
       io.emit("raceUpdate", {
         progress: timeProgress,
         speed: visualSpeed,
@@ -335,52 +179,173 @@ const startRacePhysics = (durationSeconds, raceName = "Race") => {
         audienceCount: io.sockets.adapter.rooms.get("audience")?.size || 0,
         sampledClients: sampledSockets.map((sid) => ({
           luckyNumber: socketUsers[sid] || "Unknown",
-          taps: individualResponses[sid] || 0, // Use the new variable
+          taps: individualResponses[sid] || 0,
         })),
       });
-    }, 50); // Small delay to collect responses
+    }, CONFIG.TAP_REQUEST_TIMEOUT);
 
-    // Check if race duration has elapsed (not based on visual progress)
+    // Check race completion
     if (elapsed >= targetDuration) {
-      raceProgress = 100;
+      const winners = getWinner();
+      gameState.phase = PHASES.RESULT;
+      gameState.winners = winners;
 
-      // Determine winner: person with highest tap count
-      const sortedScores = Object.entries(scores).sort(([, a], [, b]) => b - a);
+      console.log(`Race finished! Winner: ${winners[0] || "None"}`);
 
-      const winner = sortedScores.length > 0 ? [sortedScores[0][0]] : [];
-
-      gameState.phase = "RESULT";
-      gameState.winners = winner;
-
-      console.log(
-        `Race finished after ${elapsed}ms! Winner: ${winner[0]} with ${sortedScores[0]?.[1] || 0} taps`,
-      );
-
-      io.emit("raceFinished", { winners: winner });
+      io.emit("raceFinished", { winners });
       io.emit("gameState", gameState);
       clearInterval(raceInterval);
     }
-  }, TICK_RATE);
+  }, CONFIG.TICK_RATE);
 };
 
-// This block is redundant and causing issues.
-// Logic has been moved to the primary connection handler above.
+// ============================================================================
+// SOCKET HANDLERS
+// ============================================================================
 
-// Broadcast leaderboard every 1s during race
+const handleIdentify =
+  (socket) =>
+    ({ luckyNumber }, callback) => {
+      socketUsers[socket.id] = luckyNumber;
+      socket.join("audience");
+      console.log(`Socket ${socket.id} identified as ${luckyNumber}`);
+
+      if (callback) callback({ success: true, socketId: socket.id });
+      broadcastStats();
+    };
+
+const handleUnidentify = (socket) => () => {
+  const luckyNumber = socketUsers[socket.id];
+  if (luckyNumber) {
+    console.log(`Socket ${socket.id} un-identified (was ${luckyNumber})`);
+    delete socketUsers[socket.id];
+    delete lastTestSignal[socket.id];
+    socket.leave("audience");
+    broadcastStats();
+  }
+};
+
+const handleTestSignal = (socket) => () => {
+  const luckyNumber = socketUsers[socket.id];
+  if (!luckyNumber) return;
+
+  const now = Date.now();
+  if (now - (lastTestSignal[socket.id] || 0) < CONFIG.TEST_SIGNAL_COOLDOWN)
+    return;
+
+  lastTestSignal[socket.id] = now;
+  console.log(`Test Signal from ${luckyNumber}`);
+  io.emit("server:testSignal", { luckyNumber });
+};
+
+const handleStartRace = ({
+  name,
+  durationSeconds,
+  buttonLayout = "classic",
+  selectedHorseId = "1",
+  showResult = true,
+}) => {
+  const startTime = Date.now() + CONFIG.COUNTDOWN_SECONDS * 1000;
+
+  gameState = {
+    phase: PHASES.COUNTDOWN,
+    startTime,
+    raceConfigId: "custom",
+    raceName: name,
+    raceDuration: durationSeconds,
+    buttonLayout,
+    winners: [],
+    selectedHorseId,
+    showResult,
+  };
+
+  clearScores();
+  io.emit("raceCountdown", {
+    ...gameState,
+    countdown: CONFIG.COUNTDOWN_SECONDS,
+  });
+
+  setTimeout(() => {
+    gameState.phase = PHASES.RACING;
+    io.emit("raceStarted", gameState);
+    io.emit("gameState", gameState);
+    startRacePhysics(durationSeconds, name);
+  }, CONFIG.COUNTDOWN_SECONDS * 1000);
+};
+
+const handleReset = () => {
+  gameState = { phase: PHASES.WAITING, startTime: null, raceConfigId: null };
+  io.emit("gameState", gameState);
+};
+
+const handleTaps =
+  (socket) =>
+    ({ count }) => {
+      if (gameState.phase !== PHASES.RACING) return;
+
+      const id = socketUsers[socket.id] || socket.id;
+      scores[id] = (scores[id] || 0) + count;
+    };
+
+const handleDisconnect = (socket) => () => {
+  console.log(`User disconnected: ${socket.id}`);
+  delete socketUsers[socket.id];
+  delete lastTestSignal[socket.id];
+  broadcastStats();
+};
+
+// ============================================================================
+// SOCKET CONNECTION
+// ============================================================================
+
+io.on("connection", (socket) => {
+  console.log(`User connected: ${socket.id}. Total: ${io.engine.clientsCount}`);
+
+  // Send initial state
+  const { audienceIds, luckyNumbers } = getAudienceInfo();
+  socket.emit("gameState", {
+    ...gameState,
+    connectedDevices: io.engine.clientsCount,
+    audienceCount: audienceIds.length,
+    connectedUsers: luckyNumbers,
+  });
+
+  broadcastStats();
+
+  // Register handlers
+  socket.on("identify", handleIdentify(socket));
+  socket.on("unidentify", handleUnidentify(socket));
+  socket.on("client:testSignal", handleTestSignal(socket));
+  socket.on("client:taps", handleTaps(socket));
+  socket.on("disconnect", handleDisconnect(socket));
+
+  // Admin events
+  socket.on("admin:startRace", handleStartRace);
+  socket.on("admin:reset", handleReset);
+  socket.on("admin:controlMusic", (action) =>
+    io.emit("projector:controlMusic", action),
+  );
+});
+
+// ============================================================================
+// PERIODIC BROADCASTS
+// ============================================================================
+
 setInterval(() => {
-  if (gameState.phase === "RACING") {
-    // Sort top 5?
-    const sorted = Object.entries(scores)
+  if (gameState.phase === PHASES.RACING) {
+    const leaderboard = Object.entries(scores)
       .sort(([, a], [, b]) => b - a)
       .slice(0, 10)
       .map(([id, score]) => ({ id, score }));
 
-    // Broadcast to 'admin' room only? For now broadcast all or just admin
-    io.emit("leaderboard", sorted);
+    io.emit("leaderboard", leaderboard);
   }
 }, 1000);
 
-const PORT = 3000;
-httpServer.listen(PORT, "0.0.0.0", () => {
-  console.log(`Socket Server running on port ${PORT}`);
+// ============================================================================
+// START SERVER
+// ============================================================================
+
+httpServer.listen(CONFIG.PORT, "0.0.0.0", () => {
+  console.log(`🏇 Horse Racing Server running on port ${CONFIG.PORT}`);
 });

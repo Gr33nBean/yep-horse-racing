@@ -38,9 +38,29 @@ export function useChaosMode(layout: ButtonLayout) {
 
   const moveChaos = () => {
     if (layout !== "chaos") return;
-    const top = Math.random() * 80 + 10;
-    const left = Math.random() * 80 + 10;
-    setPosition({ top: `${top}%`, left: `${left}%` });
+
+    // Get viewport dimensions
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+
+    // Estimate button radius (half of button size)
+    // Max button size is around 330px (90vw on small screens or 220px base * 1.5)
+    const buttonRadius = Math.min(viewportWidth * 0.35, 165);
+
+    // Calculate bounds - button center can be from buttonRadius to (viewport - buttonRadius)
+    const minX = buttonRadius;
+    const maxX = viewportWidth - buttonRadius;
+    const minY = buttonRadius;
+    const maxY = viewportHeight - buttonRadius;
+
+    // Generate random position within bounds
+    const x = Math.random() * (maxX - minX) + minX;
+    const y = Math.random() * (maxY - minY) + minY;
+
+    setPosition({
+      top: `${y}px`,
+      left: `${x}px`,
+    });
   };
 
   useEffect(() => {

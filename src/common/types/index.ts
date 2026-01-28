@@ -40,4 +40,5 @@ export interface GameState {
   connectedUsers?: string[]; // List of lucky numbers connected
   sampledClients?: { luckyNumber: string; taps: number }[]; // Realtime sample data
   selectedHorseId?: string;
+  showResult?: boolean; // Whether to show winner overlay on projector
 }

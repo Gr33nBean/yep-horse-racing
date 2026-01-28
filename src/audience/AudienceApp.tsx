@@ -45,9 +45,7 @@ export default function AudienceApp() {
       <div className="flex-1 flex flex-col items-center justify-center p-4 relative">
         {gameState.phase === GamePhase.WAITING && <WaitingScreen />}
 
-        {gameState.phase === GamePhase.COUNTDOWN && (
-          <CountdownScreen startTime={gameState.startTime} />
-        )}
+        {gameState.phase === GamePhase.COUNTDOWN && <CountdownScreen />}
 
         {gameState.phase === GamePhase.RACING && (
           <TapButton onTap={onTap} layout={gameState.buttonLayout} />

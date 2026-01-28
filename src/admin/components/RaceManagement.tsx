@@ -6,7 +6,6 @@ import {
   type GameState,
 } from "../../common/types";
 import { PRIZE_LEVELS } from "../../common/constants";
-import { GAME_CONFIG } from "../../common/constants/gameConfig";
 
 interface Props {
   gameState: GameState;
@@ -17,15 +16,17 @@ export function RaceManagement({ gameState }: Props) {
   const [customDuration, setCustomDuration] = useState<number>(60);
   const [buttonLayout, setButtonLayout] = useState<ButtonLayout>("classic");
   const [selectedHorse, setSelectedHorse] = useState<string>("1");
+  const [showResult, setShowResult] = useState<boolean>(true);
 
   const startRace = () => {
     if (selectedRace && customDuration) {
       socket.emit("admin:startRace", {
         name: selectedRace,
         durationSeconds: customDuration,
-        delaySeconds: GAME_CONFIG.COUNTDOWN_SECONDS,
+        delaySeconds: 3,
         buttonLayout,
         selectedHorseId: selectedHorse,
+        showResult,
       });
       // We don't clear state here so admin can easily restart same config
     }
@@ -88,6 +89,23 @@ export function RaceManagement({ gameState }: Props) {
                 </button>
               ))}
             </div>
+          </div>
+
+          {/* Show Result Toggle */}
+          <div className="space-y-2">
+            <label className="text-sm text-gray-400 font-bold">
+              SHOW WINNER RESULT
+            </label>
+            <button
+              onClick={() => setShowResult(!showResult)}
+              className={`w-full px-4 py-3 rounded-lg text-sm font-bold uppercase border transition-all ${
+                showResult
+                  ? "bg-green-600 text-white border-green-500"
+                  : "bg-gray-900 text-gray-400 border-gray-600"
+              }`}
+            >
+              {showResult ? "✓ Show Winner" : "✗ Hide Winner"}
+            </button>
           </div>
         </div>
 

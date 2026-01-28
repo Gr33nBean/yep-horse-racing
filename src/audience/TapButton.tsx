@@ -1,4 +1,5 @@
 import { useTapStreak, useChaosMode, type TapTier } from "./hooks/useTapButton";
+import { usePerformanceEffects } from "./hooks/useDevicePerformance";
 import { type ButtonLayout } from "../common/types";
 
 interface TapButtonProps {
@@ -9,6 +10,7 @@ interface TapButtonProps {
 export function TapButton({ onTap, layout = "classic" }: TapButtonProps) {
   const { streak, incrementStreak, currentTier } = useTapStreak();
   const { position, moveChaos } = useChaosMode(layout);
+  const { settings } = usePerformanceEffects();
 
   const handlePointerDown = () => {
     onTap();
@@ -16,8 +18,13 @@ export function TapButton({ onTap, layout = "classic" }: TapButtonProps) {
     incrementStreak();
   };
 
-  const styles = getButtonStyles(currentTier, layout === "small");
-  const shakeClass = streak > 20 ? "shake-animation" : "";
+  const styles = getButtonStyles(
+    currentTier,
+    layout === "small",
+    settings.enableGradients,
+  );
+  const shakeClass =
+    settings.enableShake && streak > 20 ? "shake-animation" : "";
 
   // Chaos positioning styles
   const containerStyles =
@@ -27,7 +34,9 @@ export function TapButton({ onTap, layout = "classic" }: TapButtonProps) {
           top: position.top,
           left: position.left,
           transform: "translate(-50%, -50%)",
-          transition: "top 0.2s, left 0.2s",
+          transition: settings.enableAnimations
+            ? "top 0.15s ease-out, left 0.15s ease-out"
+            : "none",
           width: "auto",
           height: "auto",
         }
@@ -38,9 +47,15 @@ export function TapButton({ onTap, layout = "classic" }: TapButtonProps) {
         };
 
   return (
-    <div className="relative flex flex-col items-center justify-center transition-all duration-300 w-full h-full overflow-hidden">
+    <div className="relative flex flex-col items-center justify-center w-full h-full overflow-hidden">
       {/* Streak Display */}
-      <StreakDisplay streak={streak} tier={currentTier} />
+      {settings.enableStreakDisplay && (
+        <StreakDisplay
+          streak={streak}
+          tier={currentTier}
+          enableBounce={settings.enableStreakBounce}
+        />
+      )}
 
       {/* Button Wrapper */}
       <div
@@ -48,7 +63,7 @@ export function TapButton({ onTap, layout = "classic" }: TapButtonProps) {
         style={containerStyles}
       >
         <button
-          className="tap-btn rounded-full flex items-center justify-center select-none outline-none relative overflow-hidden transition-all duration-300"
+          className="tap-btn rounded-full flex items-center justify-center select-none outline-none relative overflow-hidden"
           onPointerDown={handlePointerDown}
           style={{
             width: styles.size,
@@ -56,19 +71,28 @@ export function TapButton({ onTap, layout = "classic" }: TapButtonProps) {
             maxWidth: "90vh",
             maxHeight: "90vw",
             background: styles.background,
-            boxShadow: styles.boxShadow,
+            boxShadow: settings.enableShadows ? styles.boxShadow : "none",
             borderColor: styles.borderColor,
+            transition: settings.enableAnimations
+              ? "width 0.3s, height 0.3s, background 0.3s"
+              : "none",
           }}
         >
-          {/* Subtle pulse for fire mode */}
-          {(currentTier === "fire" || currentTier === "infinite") && (
-            <div className="absolute inset-0 bg-white opacity-20 animate-ping rounded-full pointer-events-none" />
-          )}
+          {/* Pulse effect for fire mode (only on high-performance devices) */}
+          {settings.enablePulse &&
+            (currentTier === "fire" || currentTier === "infinite") && (
+              <div className="absolute inset-0 bg-white opacity-20 animate-ping rounded-full pointer-events-none" />
+            )}
 
           <div className="text-center pointer-events-none z-10">
             <span
-              className="block font-black text-white drop-shadow-md tracking-wider transition-all duration-300"
-              style={{ fontSize: styles.fontSize }}
+              className="block font-black text-white tracking-wider"
+              style={{
+                fontSize: styles.fontSize,
+                textShadow: settings.enableShadows
+                  ? "0 2px 4px rgba(0,0,0,0.3)"
+                  : "none",
+              }}
             >
               {styles.text}
             </span>
@@ -79,21 +103,26 @@ export function TapButton({ onTap, layout = "classic" }: TapButtonProps) {
         </button>
       </div>
 
+      {/* Performance indicator (dev only - can be removed) */}
+      {/* <div className="absolute bottom-2 right-2 text-xs text-white/50">{tier}</div> */}
+
       <style>{`
         .tap-btn {
           border-width: 6px;
           border-style: solid;
           transform: scale(1) translate3d(0,0,0);
-          transition: width 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), height 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), background 0.3s;
           -webkit-tap-highlight-color: transparent;
-          touch-action: none; 
-          will-change: transform, width, height;
+          touch-action: none;
+          ${settings.enableAnimations ? "will-change: transform, width, height;" : ""}
         }
 
         .tap-btn:active {
           transform: scale(0.95) translate3d(0,0,0);
         }
 
+        ${
+          settings.enableShake
+            ? `
         .shake-animation {
           animation: shake 0.3s infinite linear;
           will-change: transform;
@@ -106,12 +135,21 @@ export function TapButton({ onTap, layout = "classic" }: TapButtonProps) {
           75% { transform: translate3d(3px, -2px, 0); }
           100% { transform: translate3d(0, 0, 0); }
         }
+        `
+            : ""
+        }
       `}</style>
     </div>
   );
 }
 
-function StreakDisplay({ streak, tier }: { streak: number; tier: TapTier }) {
+interface StreakDisplayProps {
+  streak: number;
+  tier: TapTier;
+  enableBounce: boolean;
+}
+
+function StreakDisplay({ streak, tier, enableBounce }: StreakDisplayProps) {
   if (streak <= 5) return null;
 
   const tierColors = {
@@ -130,9 +168,12 @@ function StreakDisplay({ streak, tier }: { streak: number; tier: TapTier }) {
 
   return (
     <div className="fixed top-12 left-0 right-0 pointer-events-none flex flex-col items-center justify-start z-50">
-      <div className="animate-bounce text-center">
+      <div
+        className={enableBounce ? "animate-bounce" : ""}
+        style={{ textAlign: "center" }}
+      >
         <span
-          className="block font-black italic tracking-tighter stroke-black drop-shadow-xl transition-all duration-300"
+          className="block font-black italic tracking-tighter"
           style={{
             color: tierColors[tier],
             fontSize: tier === "infinite" ? "6rem" : "4rem",
@@ -141,7 +182,7 @@ function StreakDisplay({ streak, tier }: { streak: number; tier: TapTier }) {
         >
           {streak}
         </span>
-        <span className="block text-lg font-bold text-white uppercase tracking-widest drop-shadow-md bg-black/30 px-4 py-1 rounded-full backdrop-blur-sm">
+        <span className="block text-lg font-bold text-white uppercase tracking-widest bg-black/30 px-4 py-1 rounded-full">
           {tierLabels[tier]}
         </span>
       </div>
@@ -149,14 +190,27 @@ function StreakDisplay({ streak, tier }: { streak: number; tier: TapTier }) {
   );
 }
 
-function getButtonStyles(tier: TapTier, isSmall: boolean) {
+function getButtonStyles(
+  tier: TapTier,
+  isSmall: boolean,
+  enableGradients: boolean,
+) {
   const baseSize = isSmall ? 120 : 220;
+
+  // Solid color fallbacks for low-performance devices
+  const solidColors = {
+    infinite: "#b45309",
+    fire: "#d97706",
+    heat: "#c2410c",
+    normal: "#b91c1c",
+  };
 
   switch (tier) {
     case "infinite":
       return {
-        background:
-          "radial-gradient(circle at center, #fbbf24 0%, #b45309 60%, #7c2d12 100%)",
+        background: enableGradients
+          ? "radial-gradient(circle at center, #fbbf24 0%, #b45309 60%, #7c2d12 100%)"
+          : solidColors.infinite,
         boxShadow:
           "0 0 100px rgba(251, 191, 36, 1), inset 0 0 30px rgba(255,255,255,0.8)",
         borderColor: "#fff",
@@ -167,7 +221,9 @@ function getButtonStyles(tier: TapTier, isSmall: boolean) {
       };
     case "fire":
       return {
-        background: "linear-gradient(135deg, #fbbf24 0%, #d97706 100%)",
+        background: enableGradients
+          ? "linear-gradient(135deg, #fbbf24 0%, #d97706 100%)"
+          : solidColors.fire,
         boxShadow:
           "0 10px 50px rgba(251, 191, 36, 0.8), inset 0 2px 10px rgba(255,255,255,0.5)",
         borderColor: "#fde68a",
@@ -178,7 +234,9 @@ function getButtonStyles(tier: TapTier, isSmall: boolean) {
       };
     case "heat":
       return {
-        background: "linear-gradient(135deg, #f97316 0%, #c2410c 100%)",
+        background: enableGradients
+          ? "linear-gradient(135deg, #f97316 0%, #c2410c 100%)"
+          : solidColors.heat,
         boxShadow:
           "0 10px 35px rgba(249, 115, 22, 0.7), inset 0 2px 5px rgba(255,255,255,0.3)",
         borderColor: "#fdba74",
@@ -189,7 +247,9 @@ function getButtonStyles(tier: TapTier, isSmall: boolean) {
       };
     default:
       return {
-        background: "linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)",
+        background: enableGradients
+          ? "linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)"
+          : solidColors.normal,
         boxShadow:
           "0 10px 20px rgba(220, 38, 38, 0.5), inset 0 2px 5px rgba(255,255,255,0.2)",
         borderColor: "#fca5a5",

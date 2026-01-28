@@ -1,21 +1,21 @@
 import { useEffect, useState } from "react";
 
-interface Props {
-  startTime?: number;
-}
+const COUNTDOWN_FROM = 3;
 
-export function CountdownScreen({ startTime }: Props) {
-  const [countdown, setCountdown] = useState(3);
+export function CountdownScreen() {
+  const [countdown, setCountdown] = useState(COUNTDOWN_FROM);
 
   useEffect(() => {
-    if (startTime) {
-      const interval = setInterval(() => {
-        const remaining = Math.ceil((startTime - Date.now()) / 1000);
-        setCountdown(Math.max(0, remaining));
-      }, 100);
-      return () => clearInterval(interval);
-    }
-  }, [startTime]);
+    // Start countdown immediately on mount
+    const interval = setInterval(() => {
+      setCountdown((prev) => {
+        if (prev <= 0) return 0;
+        return prev - 1;
+      });
+    }, 1000); // Decrement every second
+
+    return () => clearInterval(interval);
+  }, []);
 
   return (
     <div className="text-center space-y-6">

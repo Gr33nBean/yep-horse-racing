@@ -27,6 +27,28 @@ var import_http = require("http");
 var import_socket = require("socket.io");
 var import_cors = __toESM(require("cors"), 1);
 var import_path = __toESM(require("path"), 1);
+var CONFIG = {
+  PORT: 3e3,
+  TICK_RATE: 100,
+  // ms between race updates
+  COUNTDOWN_SECONDS: 3,
+  MIN_SPEED: 15,
+  // Minimum horse animation speed
+  SPEED_SMOOTHING: 0.8,
+  // Inertia factor (0-1)
+  TAP_REQUEST_TIMEOUT: 50,
+  // ms to wait for tap responses
+  SAMPLE_SIZE: 5,
+  // Max clients to sample for taps
+  TEST_SIGNAL_COOLDOWN: 3e3
+  // ms between test signals per user
+};
+var PHASES = {
+  WAITING: "WAITING",
+  COUNTDOWN: "COUNTDOWN",
+  RACING: "RACING",
+  RESULT: "RESULT"
+};
 var app = (0, import_express.default)();
 app.use((0, import_cors.default)());
 var DIST_PATH = import_path.default.join(process.cwd(), "dist");
@@ -40,174 +62,74 @@ app.use((req, res) => {
 });
 var httpServer = (0, import_http.createServer)(app);
 var io = new import_socket.Server(httpServer, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
-  },
+  cors: { origin: "*", methods: ["GET", "POST"] },
   pingTimeout: 6e4,
   pingInterval: 25e3,
   connectTimeout: 45e3,
   allowEIO3: true
-  // Support older socket.io clients if any
 });
 var gameState = {
-  phase: "WAITING",
+  phase: PHASES.WAITING,
   startTime: null,
   raceConfigId: null
 };
 var scores = {};
 var socketUsers = {};
-var TICK_RATE = 100;
-var raceInterval;
-var raceProgress = 0;
-var broadcastStats = () => {
+var lastTestSignal = {};
+var raceInterval = null;
+var getAudienceInfo = () => {
   const audienceIds = Array.from(
     io.sockets.adapter.rooms.get("audience") || []
   );
   const luckyNumbers = audienceIds.map((id) => socketUsers[id]).filter(Boolean).sort((a, b) => a - b);
-  const stats = {
+  return { audienceIds, luckyNumbers };
+};
+var broadcastStats = () => {
+  const { audienceIds, luckyNumbers } = getAudienceInfo();
+  io.emit("serverStats", {
     connectedDevices: io.engine.clientsCount,
     audienceCount: audienceIds.length,
     luckyNumbers
-  };
-  io.emit("serverStats", stats);
+  });
 };
-io.on("connection", (socket) => {
-  broadcastStats();
-  const audienceIds = Array.from(
-    io.sockets.adapter.rooms.get("audience") || []
-  );
-  const luckyNumbers = audienceIds.map((id) => socketUsers[id]).filter(Boolean).sort((a, b) => a - b);
-  socket.emit("gameState", {
-    ...gameState,
-    connectedDevices: io.engine.clientsCount,
-    audienceCount: audienceIds.length,
-    connectedUsers: luckyNumbers
-    // Include the list!
-  });
-  socket.on("identify", ({ luckyNumber }, callback) => {
-    socketUsers[socket.id] = luckyNumber;
-    socket.join("audience");
-    if (callback) {
-      callback({ success: true, socketId: socket.id });
-    }
-    broadcastStats();
-  });
-  const lastTestSignal = {};
-  socket.on("client:testSignal", () => {
-    const luckyNumber = socketUsers[socket.id];
-    if (!luckyNumber) return;
-    const now = Date.now();
-    const lastTime = lastTestSignal[socket.id] || 0;
-    if (now - lastTime < 3e3) {
-      return;
-    }
-    lastTestSignal[socket.id] = now;
-    io.emit("server:testSignal", { luckyNumber });
-  });
-  socket.on("unidentify", () => {
-    const luckyNumber = socketUsers[socket.id];
-    if (luckyNumber) {
-      delete socketUsers[socket.id];
-      delete lastTestSignal[socket.id];
-      socket.leave("audience");
-      broadcastStats();
-    }
-  });
-  socket.on(
-    "admin:startRace",
-    ({
-      name,
-      durationSeconds,
-      buttonLayout = "classic",
-      delaySeconds = 5,
-      selectedHorseId = "1"
-    }) => {
-      const startTime = Date.now() + delaySeconds * 1e3;
-      gameState = {
-        phase: "COUNTDOWN",
-        startTime,
-        raceConfigId: "custom",
-        // legacy or placeholder
-        raceName: name,
-        raceDuration: durationSeconds,
-        buttonLayout,
-        winners: [],
-        selectedHorseId
-      };
-      for (const k in scores) delete scores[k];
-      io.emit("raceCountdown", {
-        ...gameState,
-        countdown: delaySeconds
-      });
-      const audienceSocketIds = Array.from(
-        io.sockets.adapter.rooms.get("audience") || []
-      );
-      const audienceNumbers = audienceSocketIds.map((id) => socketUsers[id]).filter(Boolean);
-      setTimeout(() => {
-        gameState.phase = "RACING";
-        io.emit("raceStarted", gameState);
-        io.emit("gameState", gameState);
-        startRacePhysics(durationSeconds, name);
-      }, delaySeconds * 1e3);
-    }
-  );
-  socket.on("admin:reset", () => {
-    gameState = { phase: "WAITING", startTime: null, raceConfigId: null };
-    io.emit("gameState", gameState);
-  });
-  socket.on("admin:controlMusic", (action) => {
-    io.emit("projector:controlMusic", action);
-  });
-  socket.on("disconnect", () => {
-    delete socketUsers[socket.id];
-    broadcastStats();
-  });
-  socket.on("client:taps", ({ count }) => {
-    if (gameState.phase !== "RACING") {
-      return;
-    }
-    const id = socketUsers[socket.id] || socket.id;
-    if (!scores[id]) scores[id] = 0;
-    scores[id] += count;
-  });
-});
+var clearScores = () => {
+  for (const k in scores) delete scores[k];
+};
+var getWinner = () => {
+  const sorted = Object.entries(scores).sort(([, a], [, b]) => b - a);
+  return sorted.length > 0 ? [sorted[0][0]] : [];
+};
+var sampleAudienceSockets = (count) => {
+  const ids = Object.keys(socketUsers);
+  const shuffled = [...ids].sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, Math.min(count, ids.length));
+};
 var startRacePhysics = (durationSeconds, raceName = "Race") => {
-  raceProgress = 0;
   const targetDuration = durationSeconds * 1e3;
   const raceStartTime = Date.now();
   let currentSpeed = 0;
   if (raceInterval) clearInterval(raceInterval);
   raceInterval = setInterval(() => {
-    if (gameState.phase !== "RACING") {
+    if (gameState.phase !== PHASES.RACING) {
       clearInterval(raceInterval);
       return;
     }
     const elapsed = Date.now() - raceStartTime;
     const timeProgress = Math.min(elapsed / targetDuration * 100, 100);
-    const identifiedSocketIds = Object.keys(socketUsers);
-    const sampleSize = Math.min(5, identifiedSocketIds.length);
-    const sampledSockets = [];
-    const shuffled = [...identifiedSocketIds].sort(() => Math.random() - 0.5);
-    for (let i = 0; i < sampleSize; i++) {
-      sampledSockets.push(shuffled[i]);
-    }
-    if (identifiedSocketIds.length === 0) {
-    }
+    const sampledSockets = sampleAudienceSockets(CONFIG.SAMPLE_SIZE);
     let totalTaps = 0;
     let responsesReceived = 0;
     const individualResponses = {};
     sampledSockets.forEach((socketId) => {
       const socket = io.sockets.sockets.get(socketId);
       if (socket) {
-        socket.timeout(50).emit("requestTaps", {}, (err, response) => {
-          if (!err && response && response.taps) {
+        socket.timeout(CONFIG.TAP_REQUEST_TIMEOUT).emit("requestTaps", {}, (err, response) => {
+          if (!err && response?.taps) {
             totalTaps += response.taps;
             individualResponses[socketId] = response.taps;
             const luckyNumber = socketUsers[socketId];
             if (luckyNumber) {
-              if (!scores[luckyNumber]) scores[luckyNumber] = 0;
-              scores[luckyNumber] += response.taps;
+              scores[luckyNumber] = (scores[luckyNumber] || 0) + response.taps;
             }
           }
           responsesReceived++;
@@ -215,11 +137,10 @@ var startRacePhysics = (durationSeconds, raceName = "Race") => {
       }
     });
     setTimeout(() => {
-      const avgTapsOfSample = responsesReceived > 0 ? totalTaps / responsesReceived : 0;
-      const MIN_SPEED = 15;
-      const rawSpeed = avgTapsOfSample * 10 * 10;
-      const targetSpeed = Math.min(Math.max(rawSpeed, MIN_SPEED), 100);
-      currentSpeed = currentSpeed * 0.8 + targetSpeed * 0.2;
+      const avgTaps = responsesReceived > 0 ? totalTaps / responsesReceived : 0;
+      const rawSpeed = avgTaps * 100;
+      const targetSpeed = Math.min(Math.max(rawSpeed, CONFIG.MIN_SPEED), 100);
+      currentSpeed = currentSpeed * CONFIG.SPEED_SMOOTHING + targetSpeed * (1 - CONFIG.SPEED_SMOOTHING);
       const jitter = currentSpeed > 5 ? (Math.random() - 0.5) * 5 : 0;
       const visualSpeed = Math.max(0, Math.min(100, currentSpeed + jitter));
       io.emit("raceUpdate", {
@@ -230,28 +151,114 @@ var startRacePhysics = (durationSeconds, raceName = "Race") => {
         sampledClients: sampledSockets.map((sid) => ({
           luckyNumber: socketUsers[sid] || "Unknown",
           taps: individualResponses[sid] || 0
-          // Use the new variable
         }))
       });
-    }, 50);
+    }, CONFIG.TAP_REQUEST_TIMEOUT);
     if (elapsed >= targetDuration) {
-      raceProgress = 100;
-      const sortedScores = Object.entries(scores).sort(([, a], [, b]) => b - a);
-      const winner = sortedScores.length > 0 ? [sortedScores[0][0]] : [];
-      gameState.phase = "RESULT";
-      gameState.winners = winner;
-      io.emit("raceFinished", { winners: winner });
+      const winners = getWinner();
+      gameState.phase = PHASES.RESULT;
+      gameState.winners = winners;
+      io.emit("raceFinished", { winners });
       io.emit("gameState", gameState);
       clearInterval(raceInterval);
     }
-  }, TICK_RATE);
+  }, CONFIG.TICK_RATE);
 };
+var handleIdentify = (socket) => ({ luckyNumber }, callback) => {
+  socketUsers[socket.id] = luckyNumber;
+  socket.join("audience");
+  if (callback) callback({ success: true, socketId: socket.id });
+  broadcastStats();
+};
+var handleUnidentify = (socket) => () => {
+  const luckyNumber = socketUsers[socket.id];
+  if (luckyNumber) {
+    delete socketUsers[socket.id];
+    delete lastTestSignal[socket.id];
+    socket.leave("audience");
+    broadcastStats();
+  }
+};
+var handleTestSignal = (socket) => () => {
+  const luckyNumber = socketUsers[socket.id];
+  if (!luckyNumber) return;
+  const now = Date.now();
+  if (now - (lastTestSignal[socket.id] || 0) < CONFIG.TEST_SIGNAL_COOLDOWN)
+    return;
+  lastTestSignal[socket.id] = now;
+  io.emit("server:testSignal", { luckyNumber });
+};
+var handleStartRace = ({
+  name,
+  durationSeconds,
+  buttonLayout = "classic",
+  selectedHorseId = "1",
+  showResult = true
+}) => {
+  const startTime = Date.now() + CONFIG.COUNTDOWN_SECONDS * 1e3;
+  gameState = {
+    phase: PHASES.COUNTDOWN,
+    startTime,
+    raceConfigId: "custom",
+    raceName: name,
+    raceDuration: durationSeconds,
+    buttonLayout,
+    winners: [],
+    selectedHorseId,
+    showResult
+  };
+  clearScores();
+  io.emit("raceCountdown", {
+    ...gameState,
+    countdown: CONFIG.COUNTDOWN_SECONDS
+  });
+  setTimeout(() => {
+    gameState.phase = PHASES.RACING;
+    io.emit("raceStarted", gameState);
+    io.emit("gameState", gameState);
+    startRacePhysics(durationSeconds, name);
+  }, CONFIG.COUNTDOWN_SECONDS * 1e3);
+};
+var handleReset = () => {
+  gameState = { phase: PHASES.WAITING, startTime: null, raceConfigId: null };
+  io.emit("gameState", gameState);
+};
+var handleTaps = (socket) => ({ count }) => {
+  if (gameState.phase !== PHASES.RACING) return;
+  const id = socketUsers[socket.id] || socket.id;
+  scores[id] = (scores[id] || 0) + count;
+};
+var handleDisconnect = (socket) => () => {
+  delete socketUsers[socket.id];
+  delete lastTestSignal[socket.id];
+  broadcastStats();
+};
+io.on("connection", (socket) => {
+  const { audienceIds, luckyNumbers } = getAudienceInfo();
+  socket.emit("gameState", {
+    ...gameState,
+    connectedDevices: io.engine.clientsCount,
+    audienceCount: audienceIds.length,
+    connectedUsers: luckyNumbers
+  });
+  broadcastStats();
+  socket.on("identify", handleIdentify(socket));
+  socket.on("unidentify", handleUnidentify(socket));
+  socket.on("client:testSignal", handleTestSignal(socket));
+  socket.on("client:taps", handleTaps(socket));
+  socket.on("disconnect", handleDisconnect(socket));
+  socket.on("admin:startRace", handleStartRace);
+  socket.on("admin:reset", handleReset);
+  socket.on(
+    "admin:controlMusic",
+    (action) => io.emit("projector:controlMusic", action)
+  );
+});
 setInterval(() => {
-  if (gameState.phase === "RACING") {
-    const sorted = Object.entries(scores).sort(([, a], [, b]) => b - a).slice(0, 10).map(([id, score]) => ({ id, score }));
-    io.emit("leaderboard", sorted);
+  if (gameState.phase === PHASES.RACING) {
+    const leaderboard = Object.entries(scores).sort(([, a], [, b]) => b - a).slice(0, 10).map(([id, score]) => ({ id, score }));
+    io.emit("leaderboard", leaderboard);
   }
 }, 1e3);
-var PORT = 3e3;
-httpServer.listen(PORT, "0.0.0.0", () => {
+httpServer.listen(CONFIG.PORT, "0.0.0.0", () => {
 });

@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, memo } from "react";
+import { useEffect, useRef, memo, useMemo, useState } from "react";
 import { GamePhase, type GameState } from "../../common/types";
 import confetti from "canvas-confetti";
 import { FireIcon } from "../../assets/icons";
@@ -8,15 +8,26 @@ interface HorseTrackProps {
 }
 
 export function HorseTrack({ gameState }: HorseTrackProps) {
-  const [progress, setProgress] = useState(0);
-  const [speed, setSpeed] = useState(0);
-  const [connectedDevices, setConnectedDevices] = useState(0);
-  const [finished, setFinished] = useState(false);
   const confettiTriggered = useRef(false);
 
-  // Confetti effect
+  // Derived State (Single Source of Truth)
+  const isResult = gameState.phase === GamePhase.RESULT;
+  const isRacing = gameState.phase === GamePhase.RACING;
+  const showResult = gameState.showResult !== false; // Default to true if not set
+
+  const currentSpeed = isRacing || isResult ? (gameState.speed ?? 0) : 0;
+  const currentProgress = isResult
+    ? 100
+    : isRacing
+      ? (gameState.progress ?? 0)
+      : 0;
+  const connectedDevices = gameState.connectedDevices ?? 0;
+  const selectedHorseId = gameState.selectedHorseId;
+  const winners = gameState.winners ?? [];
+
+  // Confetti Effect (only if showResult is true)
   useEffect(() => {
-    if (gameState.phase === GamePhase.RESULT && !confettiTriggered.current) {
+    if (isResult && showResult && !confettiTriggered.current) {
       confettiTriggered.current = true;
       confetti({
         particleCount: 200,
@@ -29,31 +40,7 @@ export function HorseTrack({ gameState }: HorseTrackProps) {
     if (gameState.phase === GamePhase.WAITING) {
       confettiTriggered.current = false;
     }
-  }, [gameState.phase]);
-
-  // Sync State
-  useEffect(() => {
-    if (
-      gameState.phase !== GamePhase.RACING &&
-      gameState.phase !== GamePhase.RESULT
-    ) {
-      setProgress(0);
-      setSpeed(0);
-      setFinished(false);
-      return;
-    }
-
-    if (gameState.phase === GamePhase.RESULT) {
-      setFinished(true);
-      setProgress(100);
-      return;
-    }
-
-    if (gameState.progress !== undefined) setProgress(gameState.progress);
-    if (gameState.speed !== undefined) setSpeed(gameState.speed);
-    if (gameState.connectedDevices !== undefined)
-      setConnectedDevices(gameState.connectedDevices);
-  }, [gameState]);
+  }, [isResult, showResult, gameState.phase]);
 
   return (
     <div
@@ -64,13 +51,14 @@ export function HorseTrack({ gameState }: HorseTrackProps) {
         backgroundPosition: "center",
       }}
     >
-      <TrackVisuals speed={speed} selectedHorseId={gameState.selectedHorseId} />
+      <TrackVisuals speed={currentSpeed} selectedHorseId={selectedHorseId} />
 
-      <RaceMetrics speed={speed} connectedDevices={connectedDevices} />
+      <RaceMetrics speed={currentSpeed} connectedDevices={connectedDevices} />
 
-      <RaceProgress progress={progress} />
+      <RaceProgress progress={currentProgress} />
 
-      {finished && <WinnerOverlay winners={gameState.winners || []} />}
+      {isResult && showResult && <WinnerOverlay winners={winners} />}
+      {isResult && !showResult && <RaceFinishedOverlay />}
 
       <TrackStyles />
     </div>
@@ -83,54 +71,16 @@ const TrackVisuals = memo(
   ({ speed, selectedHorseId }: { speed: number; selectedHorseId?: string }) => (
     <>
       {/* Ground/Track */}
-      <div
-        className="absolute inset-0"
-        style={{
-          backgroundImage: "url('/images/race.png')",
-          backgroundSize: "cover",
-          backgroundPosition: "bottom",
-          backgroundRepeat: "no-repeat",
-        }}
-      />
-      <div
-        className="absolute inset-0"
-        style={{
-          backgroundImage: "url('/images/shadow-t.png')",
-          backgroundSize: "cover",
-          backgroundPosition: "top",
-          backgroundRepeat: "no-repeat",
-        }}
-      />
+      <div className="absolute inset-0 bg-[url('/images/race.png')] bg-cover bg-bottom bg-no-repeat" />
+      <div className="absolute inset-0 bg-[url('/images/shadow-t.png')] bg-cover bg-top bg-no-repeat" />
 
-      <div
-        className="absolute left-0 top-0 w-[20%] aspect-[200/110]"
-        style={{
-          backgroundImage: "url('/images/left.png')",
-          backgroundSize: "contain",
-          backgroundRepeat: "no-repeat",
-        }}
-      />
-
-      <div
-        className="absolute right-0 top-0 w-[18%] aspect-[200/110]"
-        style={{
-          backgroundImage: "url('/images/right.png')",
-          backgroundSize: "contain",
-          backgroundRepeat: "no-repeat",
-        }}
-      />
-
-      <div
-        className="absolute left-1/2 -translate-x-1/2 top-[6.5%] w-[30%] aspect-[300/48]"
-        style={{
-          backgroundImage: "url('/images/logo.png')",
-          backgroundSize: "contain",
-          backgroundRepeat: "no-repeat",
-        }}
-      />
+      {/* Decorative Assets */}
+      <div className="absolute left-0 top-0 w-[20%] aspect-[200/110] bg-[url('/images/left.png')] bg-contain bg-no-repeat" />
+      <div className="absolute right-0 top-0 w-[18%] aspect-[200/110] bg-[url('/images/right.png')] bg-contain bg-no-repeat" />
+      <div className="absolute left-1/2 -translate-x-1/2 top-[6.5%] w-[30%] aspect-[300/48] bg-[url('/images/logo.png')] bg-contain bg-no-repeat" />
 
       {/* Horse Animation */}
-      <div className="absolute left-1/2 -translate-x-1/2 bottom-[20.78%] aspect-square h-[43.75%] z-10">
+      <div className="absolute left-1/2 -translate-x-1/2 bottom-[22%] aspect-square h-[45%] z-10">
         <HorseSprite speed={speed} selectedHorseId={selectedHorseId} />
       </div>
 
@@ -141,19 +91,22 @@ const TrackVisuals = memo(
 );
 
 const FireParticles = memo(({ speed }: { speed: number }) => {
-  const particles = useRef(
-    [...Array(50)].map(() => ({
-      left: `${Math.random() * 100}%`,
-      top: `${40 + Math.random() * 60}%`,
-      delay: `-${Math.random() * 8}s`,
-      scale: 0.5 + Math.random() * 1.5,
-      duration: 3 + Math.random() * 4, // Slower, more graceful
-      blur: Math.random() * 2, // Depth of field effect
-      xDrift: (Math.random() - 0.5) * 50, // Slight horizontal drift
-    })),
-  ).current;
+  const particles = useMemo(
+    () =>
+      [...Array(36)].map(() => ({
+        left: `${Math.random() * 100}%`,
+        bottom: `-${5 + Math.random() * 10}%`,
+        delay: `-${Math.random() * 10}s`,
+        scale: 0.5 + Math.random() * 1.5,
+        duration: 3 + Math.random() * 5,
+        maxOpacity: 0.4 + Math.random() * 0.6,
+        xDrift: (Math.random() - 0.5) * 50,
+        blur: Math.random() * 2,
+      })),
+    [],
+  );
 
-  // Global intensity
+  // Calculate intensity based on speed
   const intensity = Math.min(1, Math.max(0, (speed - 5) / 60));
 
   if (speed < 5) return null;
@@ -164,22 +117,20 @@ const FireParticles = memo(({ speed }: { speed: number }) => {
       style={{
         opacity: intensity,
         transition: "opacity 0.5s",
-        mixBlendMode: "screen", // clearer fire look
+        mixBlendMode: "screen",
       }}
     >
       {particles.map((p, i) => (
         <div
           key={i}
-          className="absolute animate-fire-float"
+          className="absolute animate-fire-rise-fade"
           style={{
             left: p.left,
-            top: p.top,
+            bottom: p.bottom,
             animationDelay: p.delay,
-            animationDuration: `${Math.max(1, p.duration / (speed / 40 + 0.5))}s`,
-            filter: `blur(${p.blur}px) drop-shadow(0 0 ${p.scale * 4}px #FF5500)`,
-            // We use a CSS var for drift if we wanted dynamic, but keyframes are easier if generic
-            // For unique drift, we can set custom property or just rely on generic wobble
+            animationDuration: `${p.duration}s`,
             transform: `scale(${p.scale})`,
+            opacity: p.maxOpacity,
           }}
         >
           <FireIcon
@@ -192,57 +143,58 @@ const FireParticles = memo(({ speed }: { speed: number }) => {
   );
 });
 
-const HorseSprite = ({
-  speed,
-  selectedHorseId = "1",
-}: {
-  speed: number;
-  selectedHorseId?: string;
-}) => {
-  const [frame, setFrame] = useState(0); // 0 to 4
-  const lastFrameTime = useRef(0);
+const HorseSprite = memo(
+  ({
+    speed,
+    selectedHorseId = "1",
+  }: {
+    speed: number;
+    selectedHorseId?: string;
+  }) => {
+    const [frame, setFrame] = useState(0);
+    const lastFrameTime = useRef(0);
+    const rAF = useRef<number>(0);
 
-  useEffect(() => {
-    let rAF_ID: number;
+    useEffect(() => {
+      const animate = (time: number) => {
+        if (speed <= 0.1) {
+          setFrame(0);
+          rAF.current = requestAnimationFrame(animate);
+          return;
+        }
 
-    const animate = (time: number) => {
-      // Idle if speed is 0
-      if (speed <= 0.1) {
-        setFrame(0);
-        rAF_ID = requestAnimationFrame(animate);
-        return;
-      }
+        // Calculate FPS/Delay based on speed
+        // Speed 100 -> ~30ms, Speed 1 -> ~200ms
+        const delay = Math.max(30, 200 - speed * 1.7);
 
-      // Calculate delay based on speed
-      // Speed 100 => 30ms delay
-      // Speed 1 => 200ms delay
-      const delay = Math.max(30, 200 - speed * 1.7);
+        if (time - lastFrameTime.current > delay) {
+          setFrame((prev) => (prev + 1) % 5);
+          lastFrameTime.current = time;
+        }
 
-      if (time - lastFrameTime.current > delay) {
-        setFrame((prev) => (prev + 1) % 5); // Cycle 0-4
-        lastFrameTime.current = time;
-      }
+        rAF.current = requestAnimationFrame(animate);
+      };
 
-      rAF_ID = requestAnimationFrame(animate);
-    };
+      rAF.current = requestAnimationFrame(animate);
+      return () => {
+        if (rAF.current) cancelAnimationFrame(rAF.current);
+      };
+    }, [speed]);
 
-    rAF_ID = requestAnimationFrame(animate);
-    return () => cancelAnimationFrame(rAF_ID);
-  }, [speed]);
-
-  return (
-    <div
-      className="h-full aspect-square transition-transform duration-300"
-      style={{
-        backgroundImage: `url('/images/run/${selectedHorseId}.png')`,
-        backgroundSize: "500% 100%", // 5 frames wide
-        backgroundRepeat: "no-repeat",
-        backgroundPosition: `${frame * 25}% center`, // 0%, 25%, 50%, 75%, 100%
-        transform: `scale(${1 + speed / 400})`,
-      }}
-    />
-  );
-};
+    return (
+      <div
+        className="h-full aspect-square transition-transform duration-300"
+        style={{
+          backgroundImage: `url('/images/run/${selectedHorseId}.png')`,
+          backgroundSize: "500% 100%",
+          backgroundRepeat: "no-repeat",
+          backgroundPosition: `${frame * 25}% center`,
+          transform: `scale(${1 + speed / 400})`,
+        }}
+      />
+    );
+  },
+);
 
 const RaceMetrics = memo(
   ({
@@ -280,7 +232,6 @@ const RaceProgress = memo(({ progress }: { progress: number }) => (
       <FireIcon width={"2.5vh"} height={"2.5vh"} />
     </div>
     <div className="bg-black/50 rounded-full h-[3.2vh] overflow-hidden border-2 border-white/30  shadow-inner relative">
-      {/* Track marks */}
       <div className="absolute inset-0 flex justify-between px-[1vw] opacity-30">
         {[...Array(10)].map((_, i) => (
           <div key={i} className="w-[0.2vw] h-full bg-white/50" />
@@ -295,9 +246,7 @@ const RaceProgress = memo(({ progress }: { progress: number }) => (
             "linear-gradient(90.04deg, #FFCA39 0.84%, #FFFFFC 99.98%), #D9D9D9",
         }}
       >
-        {/* Glare effect */}
         <div className="absolute top-0 left-0 right-0 h-1/2 bg-white/20" />
-        {/* Head indicator */}
         <div className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-1/2 w-[2vh] aspect-square bg-white rounded-full shadow-[0_0_10px_white]" />
       </div>
     </div>
@@ -328,6 +277,17 @@ const WinnerOverlay = memo(({ winners }: { winners: (string | number)[] }) => (
   </div>
 ));
 
+const RaceFinishedOverlay = memo(() => (
+  <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md animate-fade-in">
+    <div className="text-center p-12 bg-gradient-to-br from-red-500 via-orange-500 to-yellow-600 rounded-3xl shadow-2xl border-8 border-orange-200 transform scale-110 animate-bounce-slow">
+      <h2 className="text-6xl font-black text-white drop-shadow-2xl mb-4 uppercase tracking-wider">
+        🏁 Race Finished! 🏁
+      </h2>
+      <p className="text-2xl text-white/80">Thank you for participating!</p>
+    </div>
+  </div>
+));
+
 const TrackStyles = () => (
   <style>{`
     .animate-fade-in { animation: fadeIn 0.8s ease-out; }
@@ -340,15 +300,20 @@ const TrackStyles = () => (
       50% { transform: translateY(-15px) rotate(2deg); }
     }
     .animate-bounce-slow { animation: bounce 2s ease-in-out infinite; }
+    .animate-fire-rise-fade {
+      animation-name: fire-rise-fade;
+      animation-timing-function: linear;
+      animation-iteration-count: infinite;
+    }
     @keyframes bounce {
       0%, 100% { transform: scale(1.1); }
       50% { transform: scale(1.15); }
     }
-    @keyframes fire-float {
-      0% { opacity: 0; transform: translateY(0) scale(0.5); }
-      20% { opacity: 1; transform: translateY(-2vh) scale(1.1); }
-      50% { opacity: 0.8; transform: translateY(-5vh) scale(0.9); }
-      100% { opacity: 0; transform: translateY(-15vh) rotate(15deg) scale(0.6); }
+    @keyframes fire-rise-fade {
+      0% { transform: translateY(0) scale(0.3) rotate(0deg); opacity: 0; }
+      25% { opacity: 1; transform: translateY(-20vh) scale(1) rotate(5deg); }
+      60% { opacity: 0.6; transform: translateY(-60vh) scale(0.8) rotate(-5deg); }
+      100% { opacity: 0; transform: translateY(-120vh) scale(0.2) rotate(10deg); }
     }
   `}</style>
 );
