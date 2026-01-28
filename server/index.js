@@ -10,7 +10,7 @@ import path from "path";
 
 const CONFIG = {
   PORT: 3000,
-  TICK_RATE: 100, // ms between race updates
+  TICK_RATE: 200, // ms between race updates (200ms = 5 updates/sec, reduces load)
   COUNTDOWN_SECONDS: 3,
   MIN_SPEED: 15, // Minimum horse animation speed
   SPEED_SMOOTHING: 0.8, // Inertia factor (0-1)
@@ -133,7 +133,7 @@ const startRacePhysics = (durationSeconds, raceName = "Race") => {
     const elapsed = Date.now() - raceStartTime;
     const timeProgress = Math.min((elapsed / targetDuration) * 100, 100);
 
-    // Sample audience for tap data
+    // Sample audience for tap data (ONLY for speed calculation, NOT for scoring)
     const sampledSockets = sampleAudienceSockets(CONFIG.SAMPLE_SIZE);
     let totalTaps = 0;
     let responsesReceived = 0;
@@ -148,12 +148,8 @@ const startRacePhysics = (durationSeconds, raceName = "Race") => {
             if (!err && response?.taps) {
               totalTaps += response.taps;
               individualResponses[socketId] = response.taps;
-
-              const luckyNumber = socketUsers[socketId];
-              if (luckyNumber) {
-                scores[luckyNumber] =
-                  (scores[luckyNumber] || 0) + response.taps;
-              }
+              // NOTE: We do NOT add to scores here
+              // Scoring is handled by client:taps event (single source of truth)
             }
             responsesReceived++;
           });
@@ -186,15 +182,32 @@ const startRacePhysics = (durationSeconds, raceName = "Race") => {
 
     // Check race completion
     if (elapsed >= targetDuration) {
-      const winners = getWinner();
-      gameState.phase = PHASES.RESULT;
-      gameState.winners = winners;
-
-      console.log(`Race finished! Winner: ${winners[0] || "None"}`);
-
-      io.emit("raceFinished", { winners });
-      io.emit("gameState", gameState);
       clearInterval(raceInterval);
+
+      // Change to RESULT phase - this triggers clients to send finalTaps
+      gameState.phase = PHASES.RESULT;
+      io.emit("gameState", gameState);
+
+      console.log(`Race finished! Collecting final taps...`);
+
+      // Wait 2 seconds for all clients to submit their final taps
+      setTimeout(() => {
+        const winners = getWinner();
+        gameState.winners = winners;
+
+        console.log(`Final results - Winner: ${winners[0] || "None"}`);
+        console.log(`All scores:`, scores);
+
+        io.emit("raceFinished", { winners });
+        io.emit("gameState", gameState);
+
+        // Broadcast final leaderboard
+        const leaderboard = Object.entries(scores)
+          .sort(([, a], [, b]) => b - a)
+          .slice(0, 10)
+          .map(([id, score]) => ({ id, score }));
+        io.emit("leaderboard", leaderboard);
+      }, 2000); // 2 second collection window
     }
   }, CONFIG.TICK_RATE);
 };
@@ -278,13 +291,19 @@ const handleReset = () => {
   io.emit("gameState", gameState);
 };
 
-const handleTaps =
+// Handle final tap count from clients (sent once at race end)
+const handleFinalTaps =
   (socket) =>
     ({ count }) => {
-      if (gameState.phase !== PHASES.RACING) return;
+      // Only accept final taps during RESULT phase (race just ended)
+      if (gameState.phase !== PHASES.RESULT) return;
 
       const id = socketUsers[socket.id] || socket.id;
-      scores[id] = (scores[id] || 0) + count;
+      // Only accept if not already recorded
+      if (!scores[id]) {
+        scores[id] = count;
+        console.log(`Final taps from ${id}: ${count}`);
+      }
     };
 
 const handleDisconnect = (socket) => () => {
@@ -316,7 +335,7 @@ io.on("connection", (socket) => {
   socket.on("identify", handleIdentify(socket));
   socket.on("unidentify", handleUnidentify(socket));
   socket.on("client:testSignal", handleTestSignal(socket));
-  socket.on("client:taps", handleTaps(socket));
+  socket.on("client:finalTaps", handleFinalTaps(socket));
   socket.on("disconnect", handleDisconnect(socket));
 
   // Admin events
@@ -332,7 +351,8 @@ io.on("connection", (socket) => {
 // ============================================================================
 
 setInterval(() => {
-  if (gameState.phase === PHASES.RACING) {
+  // Broadcast leaderboard during RACING and RESULT phases
+  if (gameState.phase === PHASES.RACING || gameState.phase === PHASES.RESULT) {
     const leaderboard = Object.entries(scores)
       .sort(([, a], [, b]) => b - a)
       .slice(0, 10)

@@ -29,8 +29,8 @@ var import_cors = __toESM(require("cors"), 1);
 var import_path = __toESM(require("path"), 1);
 var CONFIG = {
   PORT: 3e3,
-  TICK_RATE: 100,
-  // ms between race updates
+  TICK_RATE: 200,
+  // ms between race updates (200ms = 5 updates/sec, reduces load)
   COUNTDOWN_SECONDS: 3,
   MIN_SPEED: 15,
   // Minimum horse animation speed
@@ -127,10 +127,6 @@ var startRacePhysics = (durationSeconds, raceName = "Race") => {
           if (!err && response?.taps) {
             totalTaps += response.taps;
             individualResponses[socketId] = response.taps;
-            const luckyNumber = socketUsers[socketId];
-            if (luckyNumber) {
-              scores[luckyNumber] = (scores[luckyNumber] || 0) + response.taps;
-            }
           }
           responsesReceived++;
         });
@@ -155,12 +151,17 @@ var startRacePhysics = (durationSeconds, raceName = "Race") => {
       });
     }, CONFIG.TAP_REQUEST_TIMEOUT);
     if (elapsed >= targetDuration) {
-      const winners = getWinner();
-      gameState.phase = PHASES.RESULT;
-      gameState.winners = winners;
-      io.emit("raceFinished", { winners });
-      io.emit("gameState", gameState);
       clearInterval(raceInterval);
+      gameState.phase = PHASES.RESULT;
+      io.emit("gameState", gameState);
+      setTimeout(() => {
+        const winners = getWinner();
+        gameState.winners = winners;
+        io.emit("raceFinished", { winners });
+        io.emit("gameState", gameState);
+        const leaderboard = Object.entries(scores).sort(([, a], [, b]) => b - a).slice(0, 10).map(([id, score]) => ({ id, score }));
+        io.emit("leaderboard", leaderboard);
+      }, 2e3);
     }
   }, CONFIG.TICK_RATE);
 };
@@ -223,10 +224,12 @@ var handleReset = () => {
   gameState = { phase: PHASES.WAITING, startTime: null, raceConfigId: null };
   io.emit("gameState", gameState);
 };
-var handleTaps = (socket) => ({ count }) => {
-  if (gameState.phase !== PHASES.RACING) return;
+var handleFinalTaps = (socket) => ({ count }) => {
+  if (gameState.phase !== PHASES.RESULT) return;
   const id = socketUsers[socket.id] || socket.id;
-  scores[id] = (scores[id] || 0) + count;
+  if (!scores[id]) {
+    scores[id] = count;
+  }
 };
 var handleDisconnect = (socket) => () => {
   delete socketUsers[socket.id];
@@ -245,7 +248,7 @@ io.on("connection", (socket) => {
   socket.on("identify", handleIdentify(socket));
   socket.on("unidentify", handleUnidentify(socket));
   socket.on("client:testSignal", handleTestSignal(socket));
-  socket.on("client:taps", handleTaps(socket));
+  socket.on("client:finalTaps", handleFinalTaps(socket));
   socket.on("disconnect", handleDisconnect(socket));
   socket.on("admin:startRace", handleStartRace);
   socket.on("admin:reset", handleReset);
@@ -255,7 +258,7 @@ io.on("connection", (socket) => {
   );
 });
 setInterval(() => {
-  if (gameState.phase === PHASES.RACING) {
+  if (gameState.phase === PHASES.RACING || gameState.phase === PHASES.RESULT) {
     const leaderboard = Object.entries(scores).sort(([, a], [, b]) => b - a).slice(0, 10).map(([id, score]) => ({ id, score }));
     io.emit("leaderboard", leaderboard);
   }
